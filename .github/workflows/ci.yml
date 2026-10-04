@@ -13,42 +13,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12",cache: pip}
+        with: { python-version: "3.12", cache: pip}
       - run: pip install -r requirements.txt ansible-core boto3
       - run: python manage.py check
-      - run: python mange.py makemigrations --check --dry-run
+      - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py test
       - run: ansible-galaxy collection install -r deploy/requirements.yml
       - run: ansible-playbook -i localhost, deploy/deploy.yml --syntax-check
-deploy:
-  needs: test
-  if: github.event_name == "push"
-  runs-on: ubuntu-latest
-  environment: prod
-  concurrecny: { group: deploy-prod, cancel-in-progress: false }
-  permissions:
-    id-token: write
-    contents: read
-  env:
-    DEPLOY_BUCKET: ${{ vars.DEPLOY_BUCKET }}
-    RELEASE_SHA: ${{ github.sha }}
-  steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with: { python-version: "3.12"}
-    - run: pip install ansible-core boto3 botocore
-    - run: ansible-galaxy collection install -r deploy/requirements.yml
-    - name: Session Manager plugin
-      run: |
-        curl -fsSL https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubbuntu_64bit/session-manager-plugin.deb -o smp.deb
-        sudo dpkg -i smp.deb
-    - uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ vars.AWS_ROLE.ARN }}
-        aws-region: eu-north-1
-    - name: Build artifact
-      run: tar czf "$RUNNER_TEMP/app.tar.gz" --exclude=.git --exclude=.github --exclude=deploy --exclude__pycache__ .
-    - name: Deploy
-      run: ansible-playbook -i deploy/inventory/aws_ec2.yml deploy/deploy.yml
-      env:
-        ARTIFACT_PATH ${{ runner.temp }}/app.tar.gz
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: prod
+    concurrency: { group: deploy-prod, cancel-in-progress: false }
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      DEPLOY_BUCKET: ${{ vars.DEPLOY_BUCKET }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12"}
+      - run: pip install ansible-core boto3 botocore
+      - run: ansible-galaxy collection install -r deploy/requirements.yml
+      - name: Session Manager plugin
+        run: |
+          curl -fsSL https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb -o smp.deb
+          sudo dpkg -i smp.deb
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: eu-north-1
+      - name: Build artifact
+        run: tar czf "$RUNNER_TEMP/app.tar.gz" --exclude=.git --exclude=.github --exclude=deploy --exclude=venv --exclude=db.sqlite3 --exclude=__pycache__ .
+      - name: Deploy
+        run: ansible-playbook -i deploy/inventory/aws_ec2.yml deploy/deploy.yml
+        env:
+          ARTIFACT_PATH: ${{ runner.temp }}/app.tar.gz

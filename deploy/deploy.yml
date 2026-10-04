@@ -1,0 +1,135 @@
+---
+- name: Deploy django
+  hosts: web
+  become: true
+  vars:
+    ansible_connection: community.aws.aws_ssm
+    ansible_aws_ssm_region: eu-north-1
+    ansible_aws_ssm_bucket_name: "{{lookup('env','DEPLOY_BUCKET') }}"
+    ansible_python_interpreter: /usr/bin/python3
+
+    django_module: ABCLimited
+    env_name: prod
+    app_user: django
+    app_root: /opt/django_app
+    release_sha: "{{ lookup('env','RELEASE_SHA') }}"
+    release_dir: "{{ app_root }}/releases/{{ release_sha }}"
+    current: "{{ app_root }}/current"
+    keep_releases: 5
+
+    ssm_params: >-
+      {{ lookup('amazon.aws.ssm_parameter', '/myapp/' ~ env_name ~ '/',
+      bypath=true,recursive=true,shortnames=true,region='eu-north-1')}}
+    django_env: >-
+      {{ {'DJANGO_SETTINGS_MODULE': django_module ~ '.settings',
+      'DJANGO_ENV':env_name} | combine(ssm_params)}}
+  pre_tasks:
+  - ansible.builtin.assert:
+      that: release_sha | length > 0
+  tasks:
+    - name: System packages
+      ansible.builtin.apt:
+        name: [python3-venv,python3-pip,nginx,acl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+    - name: App user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ app_root }}"
+        create_home: false
+    - name: Directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        mode: "0755"
+      loop: ["{{ app_root }}", "{{ app_root }}/releases", "{{ release_dir }}"]
+    - name: Unpack artifact
+      ansible.builtin.unarchive:
+        src: "{{ lookup('env','ARTIFACT_PATH') }}"
+        dest: "{{ release_dir}}"
+        owner: "{{ app_user }}"
+        creates: "{{ release_dir }}/manage.py"
+    - name: Install pinned deps
+      ansible.builtin.pip:
+        requirements: "{{ release_dir }}/requirements.txt"
+        virtualenv: "{{ release_dir }}/venv"
+        virtualenv_command: python3 -m venv
+      become_user: "{{ app_user }}"
+    - name: Env file
+      ansible.builtin.copy:
+        dest: "{{ app_root }}/app.env"
+        content: |
+          {% for k, v in django_env.items() %}
+          {{ k }}={{ v }}
+          {% endfor %}
+        owner: root
+        group: "{{ app_user }}"
+        mode: "0640"
+      no_log: true
+      notify: Restart gunicorn
+    - name: Migrate
+      ansible.builtin.command: "{{ release_dir }}/venv/bin/python manage.py migrate --noinput"
+      args: { chdir: "{{ release_dir }}"}
+      environment: "{{ django_env }}"
+      become_user: "{{ app_user }}"
+      no_log: true
+      run_once: true
+    - name: collectstatic
+      ansible.builtin.command: "{{ release_dir }}/venv/bin/python manage.py collectstatic --noinput"
+      args: { chdir: "{{ release_dir }}"}
+      environment: "{{ django_env }}"
+      become_user: "{{ app_user }}"
+      no_log: true
+    - name: Gunicorn unit
+      ansible.builtin.template:
+        src: gunicorn.service.j2
+        dest: /etc/systemd/system/gunicorn.service
+        mode: "0644"
+      notify: Restart gunicorn
+    - name: Nginx site
+      ansible.builtin.template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/conf.d/django.conf
+        mode: "0644"
+      notify: Reload nginx
+    - name: Remove default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+    - name: Point current at release_dir
+      ansible.builtin.file:
+        src: "{{ release_dir }}"
+        dest: "{{ current }}"
+        state: link
+      notify: Restart gunicorn
+    - name: Enable services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop: [gunicorn,nginx]
+    - name: Prune old releases
+      ansible.builtin.shell: |
+        ls -1dt {{ app_root }}/releases/* | tail -n +{{ keep_releases +1 }} | xargs -r rm -rf
+      changed_when: false
+    - ansible.builtin.meta: flush_handlers
+    - name: Health check
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8000/healthz
+        headers: { Host: localhost }
+        status_code: 200
+      register: hc
+      retries: 10
+      delay: 3
+      until: hc.status == 200
+  handlers:
+    - name: Restart gunicorn
+      ansible.builtin.systemd: { name: gunicorn, state: restarted }
+    - name: Reload nginx
+      ansible.builtin.systemd: { name: nginx, state: reloaded }

@@ -1,0 +1,11 @@
+plugin: amazon.aws.aws_ec2
+regions: [eu-north-1]
+filters:
+  tag:App: myapp
+  tag:Env: prod
+  instance-state-name: running
+groups:
+  web: "true"
+compose:
+  ansible_host: instance_id
+  

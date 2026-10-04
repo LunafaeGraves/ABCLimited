@@ -1,0 +1,13 @@
+[Unit]
+Description=Gunicorn (Django)
+After=network.target
+
+[Service]
+User={{ app_user }}
+WorkingDirectory ={{ current }}
+EnvironmentFile={{ app_root }}/app.env
+ExecStart={{ current }}/venv/bin/gunicorn {{ django_module }}.wsgi:application --bind 127.0.0.1:8000 --workers 3
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
